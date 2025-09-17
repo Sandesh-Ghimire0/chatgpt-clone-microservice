@@ -17,6 +17,7 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 app.use("/api/v1/auth", expressProxy("http://localhost:4001"));
-app.use("/api/v1/user", expressProxy("http://localhost:4002"));
+// app.use("/api/v1/user", expressProxy("http://localhost:4002"));
+app.use("/api/v1/chat", expressProxy('http://localhost:4002'))
 
 export default app;
