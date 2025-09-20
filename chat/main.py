@@ -2,8 +2,8 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, HTTPException, Body
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException, Body, Query
+from fastapi.responses import JSONResponse, StreamingResponse
 from agent import workflow  
 from pydantic import BaseModel, Field
 from langchain_core.messages import HumanMessage, AIMessage
@@ -13,6 +13,7 @@ import uuid
 from typing import Optional
 from pymongo import MongoClient
 import os
+from fastapi.middleware.cors import CORSMiddleware
 
 
 
@@ -21,6 +22,19 @@ CLIENT = os.getenv("MONGODB_CLIENT")
 DATABASE_NAME = os.getenv("DATABASE_NAME")
 
 app = FastAPI()
+
+origins = [
+    "http://localhost:5173",  # your React dev server
+    "http://localhost:4000",  # if you use backend proxy
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # or ["*"] for all origins
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 client = MongoClient(CLIENT)
 db = client.DATABASE_NAME
@@ -49,6 +63,38 @@ def get_title(question, answer):
     }).model_dump()
 
     return result['title']
+
+
+def event_stream(question, thread_id):
+    try:
+        no_title = False
+        answer = ''
+        if thread_id == 'undefined':
+            no_title = True
+            thread_id = str(uuid.uuid4())
+
+
+        CONFIG = {"configurable":{'thread_id':thread_id}}
+        input_state = {"messages":[question]}
+
+        for message_chunk, metadata in workflow.stream(
+            input_state, config=CONFIG, stream_mode='messages'
+        ):
+            if message_chunk.content:
+                answer += message_chunk.content
+                yield f"data: {message_chunk.content}\n\n"
+
+        if no_title:
+            title = get_title(question, answer)
+            items_collection.insert_one({
+                'title':title,
+                'thread_id':thread_id  
+            })
+        yield f"event: end\ndata: {thread_id}\n\n"
+
+    except Exception as e:
+        yield f"event: error\ndata: {str(e)}\n\n"
+
     
 
 
@@ -58,48 +104,25 @@ def home():
 
 
 
-@app.post('/response/{thread_id}')    
-async def generate_response(data: Question, thread_id:Optional[str] = None):
+@app.get('/response/{thread_id}')    
+async def generate_response(thread_id:Optional[str] = None, question:str = Query(...)):
     try:
-        no_title = False
-        if thread_id == 'undefined':
-            no_title = True
-            thread_id = str(uuid.uuid4())
-
-        CONFIG = {"configurable":{'thread_id':thread_id}}
-        input_state = {"messages":[data.question]}
-        res = workflow.invoke(input_state, config=CONFIG)
-        ans = res['messages'][-1].content
-
-        title = None
-        if no_title:
-            title =  get_title(data.question, ans)
-            items_collection.insert_one({
-                'title':title,
-                'thread_id':thread_id
-            })
-        
-
-        return JSONResponse(
-            status_code=200,
-            content={
-                'answer':ans,
-                'thread_id':thread_id
-            }
+        return StreamingResponse(
+            event_stream(question, thread_id),
+            media_type="text/event-stream"
         )
     except Exception as e:
-        return HTTPException(
+        raise HTTPException(
             status_code=500,
             detail=str(e)
         )
 
 
-@app.post("/history")
-def get_history(data: dict = Body(...)):
+@app.get("/history")
+def get_history(thread_id: str = Query(...)):
     try:
-        thread_id = data.get("thread_id")
         chat_history = []
-        if thread_id is not None:
+        if thread_id != "undefined":
             CONFIG = {"configurable":{'thread_id':thread_id}}
             history_snapshots = list(workflow.get_state_history(config=CONFIG))
 
@@ -119,7 +142,7 @@ def get_history(data: dict = Body(...)):
         return JSONResponse(status_code=200, content=chat_history)
     
     except Exception as e:
-        return HTTPException(
+        raise HTTPException(
             status_code=500,
             detail=str(e)
         )
